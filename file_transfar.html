@@ -1,0 +1,622 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TitanShare | Infinite P2P Transfer</title>
+    
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- PeerJS for WebRTC -->
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <style>
+        body {
+            background-color: #0f172a;
+            color: #e2e8f0;
+            font-family: 'Inter', system-ui, sans-serif;
+        }
+        .glass-panel {
+            background: rgba(30, 41, 59, 0.7);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+        }
+        .animate-pulse-slow {
+            animation: pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: .5; }
+        }
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #1e293b; 
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #475569; 
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #64748b; 
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef, useCallback } = React;
+
+        // --- Utils ---
+        const formatBytes = (bytes, decimals = 2) => {
+            if (!+bytes) return '0 Bytes';
+            const k = 1024;
+            const dm = decimals < 0 ? 0 : decimals;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
+        };
+
+        const generateShortId = () => {
+            return Math.random().toString(36).substr(2, 6).toUpperCase();
+        };
+
+        // --- Icons (Using SVG strings for simplicity in one file without lucide-react wrapper) ---
+        const Icons = {
+            Upload: () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></svg>,
+            Download: () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>,
+            Copy: () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>,
+            Check: () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>,
+            File: () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4h4"/></svg>,
+            Zap: () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>,
+            Alert: () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/></svg>
+        };
+
+        // --- Components ---
+
+        const ProgressBar = ({ progress, speed, timeLeft }) => (
+            <div className="w-full space-y-2">
+                <div className="flex justify-between text-sm text-slate-400">
+                    <span>{progress.toFixed(1)}%</span>
+                    <span>{speed ? `${speed}/s` : 'Calculating...'}</span>
+                </div>
+                <div className="h-4 w-full bg-slate-700 rounded-full overflow-hidden">
+                    <div 
+                        className="h-full bg-gradient-to-r from-blue-500 to-indigo-500 transition-all duration-300 ease-out"
+                        style={{ width: `${progress}%` }}
+                    ></div>
+                </div>
+                <div className="text-xs text-slate-500 text-right">
+                    {timeLeft ? `Est. time: ${timeLeft}` : 'Starting...'}
+                </div>
+            </div>
+        );
+
+        function App() {
+            const [mode, setMode] = useState('home'); // home, sender, receiver
+            const [myPeerId, setMyPeerId] = useState(null);
+            const [peer, setPeer] = useState(null);
+            
+            // Initialization
+            useEffect(() => {
+                const id = generateShortId();
+                const newPeer = new Peer(id, {
+                    debug: 1,
+                    // Using default public PeerJS server. 
+                    // In production, you would run your own `peerjs-server`.
+                });
+
+                newPeer.on('open', (id) => {
+                    setMyPeerId(id);
+                });
+
+                newPeer.on('error', (err) => {
+                    console.error("Peer Error:", err);
+                    alert("Connection error. The public server might be busy. Please refresh.");
+                });
+
+                setPeer(newPeer);
+
+                return () => {
+                    newPeer.destroy();
+                };
+            }, []);
+
+            return (
+                <div className="min-h-screen flex flex-col items-center justify-center p-4 bg-[url('https://images.unsplash.com/photo-1451187580459-43490279c0fa?q=80&w=2072&auto=format&fit=crop')] bg-cover bg-center bg-no-repeat bg-fixed relative">
+                    <div className="absolute inset-0 bg-slate-900/90"></div>
+                    
+                    <div className="relative z-10 w-full max-w-2xl">
+                        <header className="mb-8 text-center">
+                            <h1 className="text-4xl md:text-5xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-emerald-400 flex items-center justify-center gap-3">
+                                <Icons.Zap /> TitanShare
+                            </h1>
+                            <p className="text-slate-400 mt-2 text-lg">Direct P2P Transfer. No Size Limits. No Cloud Storage.</p>
+                        </header>
+
+                        <div className="glass-panel rounded-2xl p-6 md:p-8">
+                            {mode === 'home' && (
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                    <button 
+                                        onClick={() => setMode('sender')}
+                                        className="group h-48 rounded-xl bg-gradient-to-br from-blue-600/20 to-blue-900/20 border border-blue-500/30 hover:border-blue-500 transition-all flex flex-col items-center justify-center gap-4 hover:scale-[1.02]"
+                                    >
+                                        <div className="p-4 rounded-full bg-blue-500/20 text-blue-400 group-hover:bg-blue-500 group-hover:text-white transition-colors">
+                                            <Icons.Upload />
+                                        </div>
+                                        <div>
+                                            <h2 className="text-xl font-bold text-white">Send File</h2>
+                                            <p className="text-sm text-slate-400">Share connection ID</p>
+                                        </div>
+                                    </button>
+
+                                    <button 
+                                        onClick={() => setMode('receiver')}
+                                        className="group h-48 rounded-xl bg-gradient-to-br from-emerald-600/20 to-emerald-900/20 border border-emerald-500/30 hover:border-emerald-500 transition-all flex flex-col items-center justify-center gap-4 hover:scale-[1.02]"
+                                    >
+                                        <div className="p-4 rounded-full bg-emerald-500/20 text-emerald-400 group-hover:bg-emerald-500 group-hover:text-white transition-colors">
+                                            <Icons.Download />
+                                        </div>
+                                        <div>
+                                            <h2 className="text-xl font-bold text-white">Receive File</h2>
+                                            <p className="text-sm text-slate-400">Enter connection ID</p>
+                                        </div>
+                                    </button>
+                                </div>
+                            )}
+
+                            {mode === 'sender' && peer && <SenderView peer={peer} myId={myPeerId} onBack={() => setMode('home')} />}
+                            {mode === 'receiver' && peer && <ReceiverView peer={peer} onBack={() => setMode('home')} />}
+                        </div>
+
+                        <div className="mt-8 text-center text-xs text-slate-500">
+                            <p>Uses WebRTC for direct browser-to-browser transfer.</p>
+                            <p className="mt-1">Files larger than browser RAM require the File System Access API (Chrome/Edge Desktop).</p>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // --- Sender Logic ---
+        function SenderView({ peer, myId, onBack }) {
+            const [status, setStatus] = useState('waiting'); // waiting, connected, transferring, done
+            const [file, setFile] = useState(null);
+            const [conn, setConn] = useState(null);
+            const [progress, setProgress] = useState(0);
+            const [transferSpeed, setTransferSpeed] = useState('');
+            const [copied, setCopied] = useState(false);
+            
+            // Listen for connections
+            useEffect(() => {
+                if (!peer) return;
+                
+                peer.on('connection', (c) => {
+                    setConn(c);
+                    setStatus('connected');
+                    
+                    c.on('open', () => {
+                        console.log("Connected to receiver");
+                    });
+
+                    c.on('close', () => {
+                        setStatus('waiting');
+                        setConn(null);
+                        alert("Receiver disconnected.");
+                    });
+                });
+            }, [peer]);
+
+            const copyId = () => {
+                navigator.clipboard.writeText(myId);
+                setCopied(true);
+                setTimeout(() => setCopied(false), 2000);
+            };
+
+            const startTransfer = async () => {
+                if (!file || !conn) return;
+                
+                setStatus('transferring');
+                
+                // Protocol: Send Metadata First
+                conn.send({
+                    type: 'meta',
+                    name: file.name,
+                    size: file.size,
+                    mime: file.type
+                });
+
+                // Wait for ACK handled in conn.on('data') normally, 
+                // but for simplicity we'll just start streaming after a short delay
+                // In a robust app, we wait for a "READY" signal.
+                
+                const chunkSize = 16 * 1024; // 16KB safe chunk size
+                const bufferThreshold = 10 * 1024 * 1024; // 10MB buffer limit
+                let offset = 0;
+                let startTime = Date.now();
+                let lastUpdate = Date.now();
+                let lastOffset = 0;
+
+                const readSlice = (o) => {
+                    const slice = file.slice(offset, o + chunkSize);
+                    const reader = new FileReader();
+                    
+                    reader.onload = (e) => {
+                        if (!conn.open) {
+                             alert("Connection lost during transfer");
+                             return;
+                        }
+
+                        // Backpressure control
+                        if (conn.dataChannel.bufferedAmount > bufferThreshold) {
+                            setTimeout(() => readSlice(offset), 50); // Wait for buffer to drain
+                            return;
+                        }
+
+                        conn.send(e.target.result);
+                        offset += e.target.result.byteLength;
+                        
+                        // Update Progress every 500ms
+                        const now = Date.now();
+                        if (now - lastUpdate > 500) {
+                            const percent = (offset / file.size) * 100;
+                            setProgress(percent);
+                            
+                            // Speed calc
+                            const bytesSince = offset - lastOffset;
+                            const timeSince = (now - lastUpdate) / 1000;
+                            const speed = bytesSince / timeSince;
+                            setTransferSpeed(formatBytes(speed));
+                            
+                            lastUpdate = now;
+                            lastOffset = offset;
+                        }
+
+                        if (offset < file.size) {
+                            readSlice(offset);
+                        } else {
+                            // Finish
+                            conn.send({ type: 'end' });
+                            setProgress(100);
+                            setStatus('done');
+                        }
+                    };
+                    reader.readAsArrayBuffer(slice);
+                };
+
+                // Give receiver a moment to init file handle
+                setTimeout(() => readSlice(0), 1000);
+            };
+
+            return (
+                <div className="space-y-6">
+                    <div className="flex justify-between items-center mb-4 border-b border-slate-700 pb-4">
+                        <button onClick={onBack} className="text-slate-400 hover:text-white">&larr; Back</button>
+                        <span className="font-bold text-blue-400">SENDER MODE</span>
+                    </div>
+
+                    {/* Step 1: ID Display */}
+                    <div className="bg-slate-800/50 p-4 rounded-lg border border-slate-700 text-center">
+                        <p className="text-slate-400 text-sm mb-2">Share this ID with the Receiver</p>
+                        <div className="flex items-center justify-center gap-3">
+                            <code className="text-3xl font-mono font-bold tracking-wider text-white bg-slate-900 px-4 py-2 rounded">
+                                {myId || "..."}
+                            </code>
+                            <button onClick={copyId} className="p-2 hover:bg-slate-700 rounded transition-colors" title="Copy ID">
+                                {copied ? <Icons.Check className="text-green-500"/> : <Icons.Copy className="text-slate-300"/>}
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* Connection Status */}
+                    <div className="text-center">
+                        {status === 'waiting' && (
+                            <div className="flex items-center justify-center gap-2 text-yellow-400 animate-pulse">
+                                <span className="h-2 w-2 bg-yellow-400 rounded-full"></span>
+                                Waiting for connection...
+                            </div>
+                        )}
+                        {status !== 'waiting' && (
+                            <div className="flex items-center justify-center gap-2 text-emerald-400 font-medium">
+                                <span className="h-2 w-2 bg-emerald-400 rounded-full"></span>
+                                Connected to Peer
+                            </div>
+                        )}
+                    </div>
+
+                    {/* File Selection */}
+                    {status === 'connected' && (
+                        <div className="space-y-4 animate-in fade-in slide-in-from-bottom-4 duration-500">
+                            <div className="border-2 border-dashed border-slate-600 rounded-xl p-8 text-center hover:border-blue-500 transition-colors relative">
+                                <input 
+                                    type="file" 
+                                    onChange={(e) => setFile(e.target.files[0])}
+                                    className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                                />
+                                {file ? (
+                                    <div className="text-left">
+                                        <div className="flex items-center gap-3 mb-2">
+                                            <div className="p-2 bg-blue-500/20 rounded text-blue-400"><Icons.File /></div>
+                                            <div>
+                                                <div className="font-bold text-white truncate max-w-[200px]">{file.name}</div>
+                                                <div className="text-sm text-slate-400">{formatBytes(file.size)}</div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <div className="text-slate-400">
+                                        <Icons.Upload className="mx-auto h-8 w-8 mb-2 opacity-50"/>
+                                        <p>Click or Drag a file here</p>
+                                        <p className="text-xs text-slate-500 mt-1">No size limit (19GB+ supported)</p>
+                                    </div>
+                                )}
+                            </div>
+
+                            <button 
+                                onClick={startTransfer}
+                                disabled={!file}
+                                className={`w-full py-4 rounded-lg font-bold text-lg transition-all ${!file ? 'bg-slate-700 text-slate-500 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-500 text-white shadow-lg shadow-blue-600/20'}`}
+                            >
+                                Start Transfer
+                            </button>
+                        </div>
+                    )}
+
+                    {/* Progress */}
+                    {status === 'transferring' && (
+                        <div className="bg-slate-800 p-4 rounded-lg">
+                             <ProgressBar progress={progress} speed={transferSpeed} timeLeft={null} />
+                        </div>
+                    )}
+
+                    {status === 'done' && (
+                        <div className="bg-emerald-500/10 border border-emerald-500/20 p-4 rounded-lg text-center text-emerald-400">
+                            <Icons.Check className="mx-auto mb-2" />
+                            Transfer Complete!
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // --- Receiver Logic ---
+        function ReceiverView({ peer, onBack }) {
+            const [targetId, setTargetId] = useState('');
+            const [status, setStatus] = useState('idle'); // idle, connecting, connected, receiving, done
+            const [meta, setMeta] = useState(null);
+            const [progress, setProgress] = useState(0);
+            const [receivedSize, setReceivedSize] = useState(0);
+            const [speed, setSpeed] = useState('');
+            const [useFileSystem, setUseFileSystem] = useState(true);
+
+            // Refs for high-speed data handling without re-renders
+            const connectionRef = useRef(null);
+            const fileHandleRef = useRef(null);
+            const writableRef = useRef(null);
+            const bufferRef = useRef([]); // Fallback buffer for non-FileSystem API
+            const receivedBytesRef = useRef(0);
+            const lastUpdateRef = useRef(Date.now());
+            const lastBytesRef = useRef(0);
+
+            const connect = () => {
+                if (!targetId) return;
+                setStatus('connecting');
+                
+                const conn = peer.connect(targetId.toUpperCase());
+                connectionRef.current = conn;
+
+                conn.on('open', () => {
+                    setStatus('connected');
+                    setupListeners(conn);
+                });
+
+                conn.on('error', (err) => {
+                    alert("Connection failed: " + err);
+                    setStatus('idle');
+                });
+            };
+
+            const setupListeners = (conn) => {
+                conn.on('data', async (data) => {
+                    // Check if data is metadata JSON
+                    if (data.type === 'meta') {
+                        setMeta(data);
+                        handleMetadata(data);
+                    } else if (data.type === 'end') {
+                        finishTransfer();
+                    } else {
+                        // It is a chunk (ArrayBuffer)
+                        handleChunk(data);
+                    }
+                });
+
+                conn.on('close', () => {
+                   if (status !== 'done') alert("Sender disconnected");
+                });
+            };
+
+            const handleMetadata = async (metadata) => {
+                // Determine storage method
+                const canUseFS = 'showSaveFilePicker' in window && useFileSystem;
+                
+                if (canUseFS) {
+                    try {
+                        const handle = await window.showSaveFilePicker({
+                            suggestedName: metadata.name,
+                        });
+                        fileHandleRef.current = handle;
+                        writableRef.current = await handle.createWritable();
+                        setStatus('receiving');
+                    } catch (err) {
+                        console.error("FS API Cancelled or Error", err);
+                        alert("File save cancelled. Switching to memory buffer (Caution: Large files may crash).");
+                        setUseFileSystem(false);
+                        setStatus('receiving');
+                    }
+                } else {
+                    if (metadata.size > 2 * 1024 * 1024 * 1024) {
+                        alert("WARNING: You are receiving a >2GB file without File System Access. Your browser may crash due to memory limits. Use Chrome/Edge on Desktop for better results.");
+                    }
+                    setStatus('receiving');
+                }
+            };
+
+            const handleChunk = async (chunk) => {
+                receivedBytesRef.current += chunk.byteLength;
+
+                if (writableRef.current) {
+                    // Direct stream to disk
+                    await writableRef.current.write(chunk);
+                } else {
+                    // Memory buffer
+                    bufferRef.current.push(chunk);
+                }
+
+                // Throttle UI updates
+                const now = Date.now();
+                if (now - lastUpdateRef.current > 500) {
+                    const pct = (receivedBytesRef.current / (meta ? meta.size : 1)) * 100;
+                    setProgress(pct);
+                    setReceivedSize(receivedBytesRef.current);
+
+                    // Speed
+                    const bytesDiff = receivedBytesRef.current - lastBytesRef.current;
+                    const timeDiff = (now - lastUpdateRef.current) / 1000;
+                    setSpeed(formatBytes(bytesDiff / timeDiff));
+
+                    lastUpdateRef.current = now;
+                    lastBytesRef.current = receivedBytesRef.current;
+                }
+            };
+
+            const finishTransfer = async () => {
+                if (writableRef.current) {
+                    await writableRef.current.close();
+                } else {
+                    // Download Blob
+                    const blob = new Blob(bufferRef.current, { type: meta.mime || 'application/octet-stream' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = meta.name;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                    bufferRef.current = []; // Free memory
+                }
+                setProgress(100);
+                setStatus('done');
+            };
+
+            return (
+                <div className="space-y-6">
+                    <div className="flex justify-between items-center mb-4 border-b border-slate-700 pb-4">
+                        <button onClick={onBack} className="text-slate-400 hover:text-white">&larr; Back</button>
+                        <span className="font-bold text-emerald-400">RECEIVER MODE</span>
+                    </div>
+
+                    {status === 'idle' && (
+                        <div className="space-y-4">
+                            <label className="block text-sm font-medium text-slate-400">Connection ID from Sender</label>
+                            <div className="flex gap-2">
+                                <input 
+                                    type="text" 
+                                    value={targetId}
+                                    onChange={(e) => setTargetId(e.target.value.toUpperCase())}
+                                    placeholder="Ex: X7Y2Z9"
+                                    className="flex-1 bg-slate-800 border border-slate-600 rounded-lg px-4 py-3 text-white font-mono placeholder:text-slate-600 focus:outline-none focus:border-emerald-500 uppercase tracking-widest"
+                                    maxLength={6}
+                                />
+                                <button 
+                                    onClick={connect}
+                                    disabled={targetId.length < 6}
+                                    className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed text-white px-6 rounded-lg font-bold"
+                                >
+                                    Connect
+                                </button>
+                            </div>
+                            
+                            <div className="bg-slate-800/50 p-3 rounded border border-slate-700 mt-4">
+                                <label className="flex items-center gap-3 cursor-pointer">
+                                    <input 
+                                        type="checkbox" 
+                                        checked={useFileSystem} 
+                                        onChange={(e) => setUseFileSystem(e.target.checked)}
+                                        className="w-5 h-5 accent-emerald-500 rounded"
+                                    />
+                                    <div className="text-sm">
+                                        <div className="text-white font-medium">Use Stream to Disk (Recommended)</div>
+                                        <div className="text-slate-400 text-xs">Required for files &gt; 2GB. Chrome/Edge only.</div>
+                                    </div>
+                                </label>
+                            </div>
+                        </div>
+                    )}
+
+                    {status === 'connecting' && (
+                        <div className="text-center py-8">
+                            <div className="animate-spin h-8 w-8 border-4 border-emerald-500 border-t-transparent rounded-full mx-auto mb-4"></div>
+                            <p className="text-slate-400">Connecting to Sender...</p>
+                        </div>
+                    )}
+
+                    {status === 'connected' && (
+                        <div className="text-center py-8">
+                            <div className="bg-emerald-500/10 p-4 rounded-full inline-block mb-4">
+                                <Icons.Zap className="h-8 w-8 text-emerald-400" />
+                            </div>
+                            <h3 className="text-xl font-bold text-white">Connected!</h3>
+                            <p className="text-slate-400 mt-2">Waiting for sender to select file...</p>
+                        </div>
+                    )}
+
+                    {(status === 'receiving' || status === 'done') && meta && (
+                        <div className="bg-slate-800 p-6 rounded-xl border border-slate-700 space-y-4">
+                            <div className="flex items-center gap-4">
+                                <div className="p-3 bg-slate-700 rounded-lg">
+                                    <Icons.File className="text-white" />
+                                </div>
+                                <div className="flex-1 overflow-hidden">
+                                    <h4 className="font-bold text-white truncate" title={meta.name}>{meta.name}</h4>
+                                    <p className="text-sm text-slate-400">{formatBytes(meta.size)}</p>
+                                </div>
+                            </div>
+
+                            <ProgressBar progress={progress} speed={speed} />
+                            
+                            {status === 'done' && (
+                                <div className="mt-4 p-3 bg-emerald-900/30 border border-emerald-500/30 text-emerald-400 rounded text-center text-sm font-medium">
+                                    File received successfully!
+                                </div>
+                            )}
+
+                            {status === 'receiving' && useFileSystem && (
+                                <p className="text-xs text-slate-500 text-center animate-pulse">
+                                    Writing directly to disk...
+                                </p>
+                            )}
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
